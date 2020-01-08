@@ -1,5 +1,5 @@
 /*
-	//rm a.out && gcc-9 edge-detect.c bitmap.c -O2 -ftree-vectorize -fopt-info -mavx2 -fopt-info-vec-all
+	//rm a.out && gcc-9 edge-detect.c bitmap.c -O2 -ftree-vectorize -fopt-info -mavx2 -fopt-info-vec-all -pthread
 	//UTILISER UNIQUEMENT DES BMP 24bits
 	//./a.out "./in/" "./out/" 3 edge-detect
 
@@ -9,34 +9,36 @@
     // TODO : - Architecture producteur-consommateur
               - N producteurs (convertissent les fichiers puis les mettent dans la pile partagée)
               - 1 consommateur (se sert dans la pile partagée et écrit les fichiers sur le disque)
-              -> pile partagée = ressource bloquée
+
 */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <unistd.h>
+#include <string.h>
 #include "bitmap.h"
 #include <stdint.h>
 #include <dirent.h>
+#include <stdbool.h>
 
 #define DIM 3
 #define LENGHT DIM
 #define OFFSET DIM /2
 
-const float boxblur = {{ 1, 1, 1},
+const float BOXBLUR = {{ 1, 1, 1},
                        { 1, 1, 1},
                        { 1, 1, 1}};
-int is_blur = 0;
 
 //const float gaussblur = {{ (1 / 16) * 1, (1 / 16) * 2, (1 / 16) * 1},
 //					     { (1 / 16) * 2, (1 / 16) * 4, (1 / 16) * 2},
 //				         { (1 / 16) * 1, (1 / 16) * 2, (1 / 16) * 1}};
 
-const float edgedetect = {{-1,-1,-1},
+const float EDGEDETECT = {{-1,-1,-1},
 					      {-1, 8,-1},
 					      {-1,-1,-1}};
 
-const float sharpen = {{ 0,-1, 0},
+const float SHARPEN = {{ 0,-1, 0},
 					   {-1, 5,-1},
 					   { 0,-1, 0}};
 
@@ -49,6 +51,117 @@ typedef struct Color_t {
 	float Green;
 	float Blue;
 } Color_e;
+
+
+#define STACK_MAX 10 // TODO : meh
+
+typedef struct stack_t {
+    float kernel[DIM][DIM];
+	int nb_active_threads;
+	int count;
+	int nb_files;
+	int max_active_threads;
+	int is_blur;
+	char* img_names[STACK_MAX];
+    Image imgs[STACK_MAX];
+    Image new_imgs[STACK_MAX];
+	pthread_mutex_t lock;
+	pthread_cond_t can_consume;
+	pthread_cond_t can_produce;
+} Stack;
+
+static Stack stack;
+
+void stack_init() {
+    // TODO : init kernel here
+	pthread_cond_init(&stack.can_produce, NULL);
+	pthread_cond_init(&stack.can_consume, NULL);
+	pthread_mutex_init(&stack.lock, NULL);
+	stack.nb_active_threads = 0;
+	stack.is_blur = 0;
+	stack.count = 0;
+}
+
+void* producer(char* input_name);
+void* producer(char* input_name) {
+    printf("je suis un producer\n");
+
+    while (true) {
+        pthread_mutex_lock(&stack.lock);
+
+        if(stack.nb_active_threads < stack.max_active_threads) {    // Si un thread est dispo
+
+            char img_origin_name[50];
+            strcpy(img_origin_name, input_name);
+            strcat(img_origin_name, stack.img_names[stack.count]);
+
+            printf("Open bmp %s\n", img_origin_name);
+            stack.imgs[stack.count] = open_bitmap(img_origin_name); // TODO : fichier converti + mis dans la pile
+
+            printf("Applying effect\n");
+            apply_effect(&stack.imgs[stack.count], &stack.new_imgs[stack.count]);
+
+            printf("%s convertie et ajoutée à la stack\n", stack.img_names[stack.count]);
+
+            stack.count++;
+            stack.nb_active_threads++;
+
+            pthread_cond_signal(&stack.can_consume);
+        }
+        else {
+            printf("Tous les threads sont occupés :(\n");
+            while(stack.nb_active_threads >= stack.max_active_threads) {
+                pthread_cond_wait(&stack.can_produce, &stack.lock);
+            }
+            printf("Je peux a nouveau produire :)\n");
+        }
+        pthread_mutex_unlock(&stack.lock);
+
+    }
+
+    return NULL;
+}
+
+void* consumer(char* output_name);
+void* consumer(char* output_name) {
+    printf("Je suis un consumer\n");
+    // TODO : prend un fichier de la pile et l'écrit sur disque
+
+    int nb_files_converted = 0;
+
+    while(true) {
+//        printf("-- while consumer --\n");
+        pthread_mutex_lock(&stack.lock);
+//        printf("-- mutex locked consumer --\n");
+            while(stack.count == 0) {
+                printf("Rien a convertir :( \n");
+                pthread_cond_wait(&stack.can_consume, &stack.lock);
+            }
+
+            stack.count--;
+            // TODO : write file on disk
+            char img_destination_name[50];
+            strcpy(img_destination_name, output_name);
+            strcat(img_destination_name, stack.img_names[stack.count]);
+
+            printf("Save bmp %s\n", img_destination_name);
+            save_bitmap(stack.new_imgs[stack.count], img_destination_name);
+
+            nb_files_converted++;
+            printf("nb_files_converted = %d\n", nb_files_converted);
+
+            if(nb_files_converted >= stack.nb_files) {
+                printf("All %d files saved !\n", stack.nb_files);
+
+                //on ne débloque pas le mutex, pour qu'ils arretent de produire
+                break;
+            }
+            pthread_cond_signal(&stack.can_produce);
+        pthread_mutex_unlock(&stack.lock);
+    }
+
+    return NULL;
+}
 
 void delete_file(char* foldername, char* filename);
 void delete_file(char* foldername, char* filename) {
@@ -69,29 +182,36 @@ void delete_file(char* foldername, char* filename) {
     }
 }
 
-void verify_input_folder(char* input_name, int nb_thread, DIR* inp, struct dirent* entry);
-void verify_input_folder(char* input_name, int nb_thread, DIR* inp, struct dirent* entry) {
+void verify_input_folder(char* input_name, int nb_thread);
+void verify_input_folder(char* input_name, int nb_thread) {
+
+    DIR* inp = opendir(input_name);
+    struct dirent* entry;
 
     if (inp == NULL) {
         perror(input_name);
         return -1;
     }
 
-    int nb_files = 0;
     while((entry = readdir(inp))) {
         if (strstr(entry->d_name, ".bmp\0") != NULL) {
-            nb_files ++;
+            stack.img_names[stack.nb_files] = entry->d_name;
+            stack.nb_files ++;
         }
     }
-    rewinddir(inp);
 
-    if (nb_files == 2) {    // . and ..
+    closedir(inp);
+//    rewinddir(inp);
+
+    if (stack.nb_files == 2) {    // . and ..
         printf ("Empty folder.\n");
         return 0;
-    } else if (nb_thread > nb_files || nb_thread < 0) {
+    } else if (nb_thread > stack.nb_files || nb_thread < 0) {
         printf("Number of threads must be between 0 and number of files to convert\n");
         return -1;
     }
+
+    printf("Counted %d files in the input folder.", stack.nb_files);
 }
 
 void verify_output_folder(char* output_name);
@@ -134,7 +254,7 @@ void apply_effect(Image* original, Image* new_i) {
 
 					Pixel* p = &original->pixel_data[yn][xn];
 
-                    if (is_blur) {
+                    if (stack.is_blur) {
                     	c.Red += ((float) p->r) * KERNEL[a][b] / 9;
                         c.Green += ((float) p->g) * KERNEL[a][b] / 9;
                         c.Blue += ((float) p->b) * KERNEL[a][b] / 9;
@@ -167,43 +287,25 @@ int main(int argc, char** argv) {
     int nb_thread = atoi(argv[3]);
     char* effect = argv[4];
 
-    struct dirent* entry;
-    DIR* inp = opendir(input_name);
-
-    verify_input_folder(input_name, nb_thread, inp, entry);
+    verify_input_folder(input_name, nb_thread);
     verify_output_folder(output_name);
 
-    Image img;
-    Image new_i;
+for (int i = 0; i < stack.nb_files; i++) {
+    printf("img %d : %s\n", i, stack.img_names[i]);
+}
+    stack.max_active_threads = nb_thread;
 
-    while ((entry = readdir(inp))) {
-        printf("Processing '%s'...\n", entry->d_name);
+    pthread_t threads_id[nb_thread];
+    stack_init();
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-        if (strstr(entry->d_name, ".bmp\0") != NULL) {
-
-            // copying names
-            char img_origin_name[50];
-            strcpy(img_origin_name, input_name);
-            strcat(img_origin_name, entry->d_name);
-
-            char img_destination_name[50];
-            strcpy(img_destination_name, output_name);
-            strcat(img_destination_name, entry->d_name);
-
-            printf("Open bmp %s\n", img_origin_name);
-            img = open_bitmap(img_origin_name);
-
-            printf("Applying effect\n");
-            apply_effect(&img, &new_i);
-
-            printf("Save bmp %s\n", img_destination_name);
-            save_bitmap(new_i, img_destination_name);
-        }
-
-        printf("Next\n\n");
-    }
-
-	closedir(inp);
+	for(int i = 0; i < nb_thread - 1; i++) {
+		pthread_create(&threads_id[i], &attr, producer, input_name);
+	}
+	pthread_create(&threads_id[nb_thread], NULL, consumer, output_name);
+    pthread_join(threads_id[nb_thread], NULL);
 
     printf("Done !\n");
 	return 0;
