@@ -1,15 +1,8 @@
 /*
-	//rm a.out && gcc-9 edge-detect.c bitmap.c -O2 -ftree-vectorize -fopt-info -mavx2 -fopt-info-vec-all -pthread
+	//rm a.out &&
+	// gcc-9 edge-detect.c bitmap.c -O2 -ftree-vectorize -fopt-info -mavx2 -fopt-info-vec-all -pthread -o apply-effect
 	//UTILISER UNIQUEMENT DES BMP 24bits
 	//./a.out "./in/" "./out/" 3 edge-detect
-
-	// TODO : à l'initialisation des threads producteurs, pour faire simple,
-              on leur passera la liste des fichiers a traiter
-
-    // TODO : - Architecture producteur-consommateur
-              - N producteurs (convertissent les fichiers puis les mettent dans la pile partagée)
-              - 1 consommateur (se sert dans la pile partagée et écrit les fichiers sur le disque)
-
 */
 
 #include <stdio.h>
@@ -44,7 +37,7 @@ typedef struct Color_t {
 	float Green;
 	float Blue;
 } Color_e;
-
+Attantion !
 
 #define STACK_MAX 10
 
