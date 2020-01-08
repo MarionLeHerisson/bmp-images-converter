@@ -26,25 +26,18 @@
 #define LENGHT DIM
 #define OFFSET DIM /2
 
-const float BOXBLUR = {{ 1, 1, 1},
-                       { 1, 1, 1},
-                       { 1, 1, 1}};
+const float BOXBLUR[DIM][DIM] = {{ 1, 1, 1},
+                                 { 1, 1, 1},
+                                 { 1, 1, 1}};
 
-//const float gaussblur = {{ (1 / 16) * 1, (1 / 16) * 2, (1 / 16) * 1},
-//					     { (1 / 16) * 2, (1 / 16) * 4, (1 / 16) * 2},
-//				         { (1 / 16) * 1, (1 / 16) * 2, (1 / 16) * 1}};
+const float EDGEDETECT[DIM][DIM] = {{-1,-1,-1},
+                                    {-1, 8,-1},
+                                    {-1,-1,-1}};
 
-const float EDGEDETECT = {{-1,-1,-1},
-					      {-1, 8,-1},
-					      {-1,-1,-1}};
+const float SHARPEN[DIM][DIM] = {{ 0,-1, 0},
+                                 {-1, 5,-1},
+                                 { 0,-1, 0}};
 
-const float SHARPEN = {{ 0,-1, 0},
-					   {-1, 5,-1},
-					   { 0,-1, 0}};
-
-const float KERNEL[DIM][DIM] = {{-1,-1,-1},
-                              {-1, 8,-1},
-                              {-1,-1,-1}};
 
 typedef struct Color_t {
 	float Red;
@@ -53,7 +46,7 @@ typedef struct Color_t {
 } Color_e;
 
 
-#define STACK_MAX 10 // TODO : meh
+#define STACK_MAX 10
 
 typedef struct stack_t {
     float kernel[DIM][DIM];
@@ -73,12 +66,10 @@ typedef struct stack_t {
 static Stack stack;
 
 void stack_init() {
-    // TODO : init kernel here
 	pthread_cond_init(&stack.can_produce, NULL);
 	pthread_cond_init(&stack.can_consume, NULL);
 	pthread_mutex_init(&stack.lock, NULL);
 	stack.nb_active_threads = 0;
-	stack.is_blur = 0;
 	stack.count = 0;
 }
 
@@ -96,7 +87,7 @@ void* producer(char* input_name) {
             strcat(img_origin_name, stack.img_names[stack.count]);
 
             printf("Open bmp %s\n", img_origin_name);
-            stack.imgs[stack.count] = open_bitmap(img_origin_name); // TODO : fichier converti + mis dans la pile
+            stack.imgs[stack.count] = open_bitmap(img_origin_name); // fichier converti + mis dans la pile
 
             printf("Applying effect\n");
             apply_effect(&stack.imgs[stack.count], &stack.new_imgs[stack.count]);
@@ -123,23 +114,21 @@ void* producer(char* input_name) {
 }
 
 void* consumer(char* output_name);
-void* consumer(char* output_name) {
+void* consumer(char* output_name) {     // prend un fichier de la pile et l'écrit sur disque
     printf("Je suis un consumer\n");
-    // TODO : prend un fichier de la pile et l'écrit sur disque
 
     int nb_files_converted = 0;
 
     while(true) {
-//        printf("-- while consumer --\n");
         pthread_mutex_lock(&stack.lock);
-//        printf("-- mutex locked consumer --\n");
+
             while(stack.count == 0) {
                 printf("Rien a convertir :( \n");
                 pthread_cond_wait(&stack.can_consume, &stack.lock);
             }
 
             stack.count--;
-            // TODO : write file on disk
+
             char img_destination_name[50];
             strcpy(img_destination_name, output_name);
             strcat(img_destination_name, stack.img_names[stack.count]);
@@ -182,8 +171,8 @@ void delete_file(char* foldername, char* filename) {
     }
 }
 
-void verify_input_folder(char* input_name, int nb_thread);
-void verify_input_folder(char* input_name, int nb_thread) {
+int verify_input_folder(char* input_name, int nb_thread);
+int verify_input_folder(char* input_name, int nb_thread) {
 
     DIR* inp = opendir(input_name);
     struct dirent* entry;
@@ -211,7 +200,8 @@ void verify_input_folder(char* input_name, int nb_thread) {
         return -1;
     }
 
-    printf("Counted %d files in the input folder.", stack.nb_files);
+    printf("Counted %d files in the input folder.\n", stack.nb_files);
+    return 0;
 }
 
 void verify_output_folder(char* output_name);
@@ -235,6 +225,29 @@ void verify_output_folder(char* output_name) {
     }
 }
 
+int verify_effect(char* effect);
+int verify_effect(char* effect) {
+
+    if(strcmp(effect, "boxblur\0") == 0) {
+        memcpy(stack.kernel, BOXBLUR, sizeof (float) * DIM * DIM);
+        stack.is_blur = 1;
+    }
+    else if(strcmp(effect, "edge-detect\0") == 0) {
+        memcpy(stack.kernel, EDGEDETECT, sizeof (float) * DIM * DIM);
+        stack.is_blur = 0;
+    }
+    else if(strcmp(effect, "sharpen\0") == 0) {
+        memcpy(stack.kernel, SHARPEN, sizeof (float) * DIM * DIM);
+        stack.is_blur = 0;
+    }
+    else {
+        printf("Error : unknown effect %s\n", effect);
+        return -1;
+    }
+
+    return 0;
+}
+
 void apply_effect(Image* original, Image* new_i);
 void apply_effect(Image* original, Image* new_i) {
 
@@ -255,14 +268,14 @@ void apply_effect(Image* original, Image* new_i) {
 					Pixel* p = &original->pixel_data[yn][xn];
 
                     if (stack.is_blur) {
-                    	c.Red += ((float) p->r) * KERNEL[a][b] / 9;
-                        c.Green += ((float) p->g) * KERNEL[a][b] / 9;
-                        c.Blue += ((float) p->b) * KERNEL[a][b] / 9;
+                    	c.Red += ((float) p->r) * stack.kernel[a][b] / 9;
+                        c.Green += ((float) p->g) * stack.kernel[a][b] / 9;
+                        c.Blue += ((float) p->b) * stack.kernel[a][b] / 9;
                     }
                     else {
-                        c.Red += ((float) p->r) * KERNEL[a][b];
-                        c.Green += ((float) p->g) * KERNEL[a][b];
-                        c.Blue += ((float) p->b) * KERNEL[a][b];
+                        c.Red += ((float) p->r) * stack.kernel[a][b];
+                        c.Green += ((float) p->g) * stack.kernel[a][b];
+                        c.Blue += ((float) p->b) * stack.kernel[a][b];
                     }
 				}
 			}
@@ -287,12 +300,12 @@ int main(int argc, char** argv) {
     int nb_thread = atoi(argv[3]);
     char* effect = argv[4];
 
-    verify_input_folder(input_name, nb_thread);
+    if(verify_input_folder(input_name, nb_thread) +
+        verify_effect(effect) != 0) {
+        return -1;
+    }
     verify_output_folder(output_name);
 
-for (int i = 0; i < stack.nb_files; i++) {
-    printf("img %d : %s\n", i, stack.img_names[i]);
-}
     stack.max_active_threads = nb_thread;
 
     pthread_t threads_id[nb_thread];
